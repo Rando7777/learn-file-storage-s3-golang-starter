@@ -91,21 +91,51 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	
-	tmpFile.Seek(0, io.SeekStart)
-	input := &s3.PutObjectInput{
-		Bucket: aws.String(cfg.s3Bucket),
-		Key: aws.String(fileName),
-		Body: tmpFile,
-		ContentType: aws.String(contentType),
+	fastStart, err := processVideoForFastStart(tmpFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Error preprocessing file", err)
+		return
+	}
+	defer os.Remove(fastStart)
+	
+	ratio, err := getVideoAspectRatio(fastStart)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Error while calculating aspect ratio of file", err)
+		return
 	}
 
+	var prefix string
+	switch ratio {
+	case "16:9":
+		prefix = "landscape"
+	case "9:16":
+		prefix = "portrait"
+	default:
+		prefix = "other"
+	}
+
+	f, err := os.Open(fastStart)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Error while calculating aspect ratio of file", err)
+		return
+	}
+	defer f.Close()
+
+	fileUrl := fmt.Sprintf("%s/%s", prefix, fileName)
+	input := &s3.PutObjectInput{
+		Bucket: aws.String(cfg.s3Bucket),
+		Key: aws.String(fileUrl),
+		Body: f,
+		ContentType: aws.String(contentType),
+	}
+	
 	_, err = cfg.s3Client.PutObject(context.TODO(), input)
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "Error failed to upload file", err)
 		return
 	}
 	
-	url := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, fileName)
+	url := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, fileUrl)
 	vid.VideoURL = &url
 	cfg.db.UpdateVideo(vid)
 
